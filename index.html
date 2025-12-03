@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>성우 철스크랩 운송 관리 시스템</title>
+    
+    <!-- 1. 라이브러리 로드 (안정성을 위해 CDN 스크립트 방식 사용) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans KR', sans-serif; background-color: #f3f4f6; }
+        
+        /* 커스텀 스크롤바 */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .modal-backdrop { background-color: rgba(0, 0, 0, 0.5); backdrop-filter: blur(4px); }
+        .cell-hover:hover { transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); }
+        
+        /* 토스트 애니메이션 */
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .toast-enter { animation: slideIn 0.3s ease-out forwards; }
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <!-- 앱 컨테이너 -->
+    <div id="app" class="flex-1 flex flex-col h-full">
+        <!-- 헤더 -->
+        <header class="bg-white shadow-md z-20 flex-none">
+            <div class="max-w-[1920px] mx-auto px-4 py-3 flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <div class="bg-blue-600 text-white p-2 rounded-lg">
+                        <i class="fa-solid fa-truck-moving text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-black text-gray-800 tracking-tight">성우 철스크랩 운송 관리</h1>
+                        <div class="flex items-center gap-2 text-xs">
+                            <span id="connection-status" class="flex items-center gap-1 text-green-600 font-bold">
+                                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> 온라인
+                            </span>
+                            <span class="text-gray-300">|</span>
+                            <span id="current-user" class="text-gray-500">인증 확인 중...</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <div class="hidden md:flex bg-gray-100 rounded-lg p-1">
+                        <button onclick="App.ui.switchTab('dispatch')" id="tab-dispatch" class="px-4 py-1.5 rounded-md text-sm font-bold bg-white shadow-sm text-blue-600 transition-all">배차 스케줄</button>
+                        <button onclick="App.ui.switchTab('vehicles')" id="tab-vehicles" class="px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700 transition-all">차량 관리</button>
+                    </div>
+                    <button onclick="App.ui.openSettings()" class="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition"><i class="fa-solid fa-gear"></i></button>
+                </div>
+            </div>
+        </header>
+
+        <!-- 메인 콘텐츠 영역 -->
+        <main class="flex-1 overflow-hidden relative bg-gray-100">
+            
+            <!-- 1. 배차 스케줄 뷰 -->
+            <div id="view-dispatch" class="h-full flex flex-col p-4 gap-4">
+                <!-- 툴바 -->
+                <div class="bg-white rounded-xl shadow-sm p-3 flex flex-wrap justify-between items-center gap-3 flex-none">
+                    <div class="flex items-center gap-2 bg-gray-50 rounded-lg p-1 border border-gray-200">
+                        <button onclick="App.logic.navigateWeek(-1)" class="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white hover:shadow-sm transition"><i class="fa-solid fa-chevron-left text-gray-500"></i></button>
+                        <div class="px-3 text-center">
+                            <span id="week-display" class="block text-sm font-bold text-gray-800">2024년 12월</span>
+                            <span id="date-range-display" class="block text-xs text-gray-500">12.01 ~ 12.07</span>
+                        </div>
+                        <button onclick="App.logic.navigateWeek(1)" class="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white hover:shadow-sm transition"><i class="fa-solid fa-chevron-right text-gray-500"></i></button>
+                        <button onclick="App.logic.gotoToday()" class="ml-2 px-3 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded hover:bg-blue-200 transition">오늘</button>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button onclick="App.ui.exportExcel()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-bold rounded-lg shadow-sm transition flex items-center gap-2">
+                            <i class="fa-solid fa-file-excel"></i> 엑셀 저장
+                        </button>
+                        <button onclick="App.ui.openDispatchModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-lg shadow-sm transition flex items-center gap-2">
+                            <i class="fa-solid fa-plus"></i> 배차 등록
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 주간 달력 테이블 -->
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 overflow-auto relative">
+                    <div id="calendar-container" class="min-w-[1000px] h-full">
+                        <!-- 자바스크립트로 렌더링 -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. 차량 관리 뷰 (숨김 상태) -->
+            <div id="view-vehicles" class="h-full flex flex-col p-4 gap-4 hidden">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-bold text-gray-800">등록된 차량 목록</h2>
+                    <button onclick="App.ui.openVehicleModal()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold rounded-lg shadow-sm transition">
+                        <i class="fa-solid fa-plus"></i> 신규 차량 등록
+                    </button>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 overflow-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead class="bg-gray-50 sticky top-0 z-10">
+                            <tr>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b">차량/기사명</th>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b">차종</th>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b">운송 구역</th>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b">연락처</th>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b">상태</th>
+                                <th class="p-4 text-xs font-bold text-gray-500 uppercase border-b text-right">관리</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vehicle-list-body" class="divide-y divide-gray-100">
+                            <!-- JS 렌더링 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- 모달 컨테이너 -->
+    <div id="modal-container"></div>
+
+    <!-- 토스트 알림 -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- Firebase SDK (모듈 방식) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, serverTimestamp, query, where, writeBatch, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // 환경 변수 처리 (Canvas 환경)
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
+        const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // ==========================================
+        // 1. Core Logic (App 객체)
+        // ==========================================
+        const App = {
+            db: null, // Firebase Firestore
+            localDB: null, // Dexie IndexedDB
+            auth: null,
+            user: null,
+            
+            state: {
+                currentDate: new Date(),
+                weekStart: null,
+                schedules: [],
+                vehicles: [],
+                isOnline: navigator.onLine,
+                settings: {
+                    noti: true,
+                    sound: true
+                }
+            },
+
+            // 초기화
+            async init() {
+                // 1. Dexie DB 설정 (오프라인 우선)
+                this.localDB = new Dexie('SeongwooDispatchDB');
+                this.localDB.version(1).stores({
+                    schedules: 'id, date, vehicleId, timestamp', 
+                    vehicles: 'id, name',
+                    pendingSync: 'id, collection, action' // 오프라인 변경사항 큐
+                });
+
+                // 2. Firebase 초기화
+                try {
+                    const app = initializeApp(firebaseConfig);
+                    this.db = getFirestore(app);
+                    this.auth = getAuth(app);
+                    
+                    // 오프라인 지속성 활성화 시도
+                    try { await enableIndexedDbPersistence(this.db); } catch(e) { console.log('Persistence disabled'); }
+
+                    // 인증
+                    if (initialToken) await signInWithCustomToken(this.auth, initialToken);
+                    else await signInAnonymously(this.auth);
+
+                    onAuthStateChanged(this.auth, (user) => {
+                        this.user = user;
+                        document.getElementById('current-user').innerText = user ? (user.isAnonymous ? '게스트 접속' : '인증된 사용자') : '미인증';
+                        this.sync.startRealtimeSync(); // 실시간 동기화 시작
+                    });
+
+                } catch (e) {
+                    console.error("Firebase Init Failed:", e);
+                    this.ui.showToast("오프라인 모드로 시작합니다.", "warning");
+                }
+
+                // 3. 이벤트 리스너 및 초기 데이터 로드
+                window.addEventListener('online', () => { this.state.isOnline = true; this.ui.updateStatus(); this.sync.processPending(); });
+                window.addEventListener('offline', () => { this.state.isOnline = false; this.ui.updateStatus(); });
+                
+                this.logic.updateWeekStart();
+                await this.data.loadFromLocal(); // 로컬 데이터 먼저 로드
+                this.ui.render();
+            },
+
+            // 데이터 관리 (CRUD)
+            data: {
+                async loadFromLocal() {
+                    App.state.schedules = await App.localDB.schedules.toArray();
+                    App.state.vehicles = await App.localDB.vehicles.toArray();
+                    App.logic.sortSchedules();
+                },
+
+                async saveDispatch(data) {
+                    const isNew = !data.id;
+                    const docId = data.id || crypto.randomUUID();
+                    const now = new Date().toISOString();
+                    
+                    const newItem = {
+                        ...data,
+                        id: docId,
+                        timestamp: Date.now(), // 충돌 해결용
+                        updatedAt: now,
+                        author: App.ui.getWriterName()
+                    };
+
+                    // 1. 로컬 저장 (즉시 반영)
+                    await App.localDB.schedules.put(newItem);
+                    
+                    // 2. 상태 업데이트
+                    if (isNew) App.state.schedules.push(newItem);
+                    else {
+                        const idx = App.state.schedules.findIndex(s => s.id === docId);
+                        if (idx > -1) App.state.schedules[idx] = newItem;
+                    }
+                    App.logic.sortSchedules();
+                    App.ui.renderCalendar(); // 부분 렌더링
+
+                    // 3. 서버 동기화 또는 큐잉
+                    if (App.state.isOnline && App.db) {
+                        const docRef = doc(App.db, 'artifacts', appId, 'public', 'data', 'dispatchSchedule', docId);
+                        setDoc(docRef, newItem, { merge: true }).catch(e => console.error("Sync fail", e));
+                    } else {
+                        await App.localDB.pendingSync.put({ id: docId, collection: 'dispatchSchedule', action: 'write', data: newItem });
+                    }
+                    
+                    App.ui.showToast(`배차가 ${isNew?'등록':'수정'}되었습니다.`);
+                    App.ui.playNotificationSound();
+                },
+
+                async deleteDispatch(id) {
+                    if(!confirm("정말 삭제하시겠습니까?")) return;
+
+                    await App.localDB.schedules.delete(id);
+                    App.state.schedules = App.state.schedules.filter(s => s.id !== id);
+                    App.ui.renderCalendar();
+
+                    if (App.state.isOnline && App.db) {
+                        const docRef = doc(App.db, 'artifacts', appId, 'public', 'data', 'dispatchSchedule', id);
+                        deleteDoc(docRef); // Fire & Forget
+                    } else {
+                        await App.localDB.pendingSync.put({ id, collection: 'dispatchSchedule', action: 'delete' });
+                    }
+                    App.ui.showToast("배차가 삭제되었습니다.", "error");
+                },
+
+                async saveVehicle(data) {
+                    const isNew = !data.id;
+                    const docId = data.id || crypto.randomUUID();
+                    const newItem = { ...data, id: docId };
+
+                    await App.localDB.vehicles.put(newItem);
+                    
+                    // 상태 업데이트
+                    if (isNew) App.state.vehicles.push(newItem);
+                    else {
+                        const idx = App.state.vehicles.findIndex(v => v.id === docId);
+                        if(idx > -1) App.state.vehicles[idx] = newItem;
+                    }
+                    App.ui.renderVehicles();
+
+                    if (App.state.isOnline && App.db) {
+                        const docRef = doc(App.db, 'artifacts', appId, 'public', 'data', 'vehicles', docId);
+                        setDoc(docRef, newItem, { merge: true });
+                    }
+                    App.ui.showToast("차량 정보가 저장되었습니다.");
+                },
+                
+                async deleteVehicle(id) {
+                    if(!confirm("차량을 삭제하시겠습니까?")) return;
+                    await App.localDB.vehicles.delete(id);
+                    App.state.vehicles = App.state.vehicles.filter(v => v.id !== id);
+                    App.ui.renderVehicles();
+                    
+                    if (App.state.isOnline && App.db) {
+                        deleteDoc(doc(App.db, 'artifacts', appId, 'public', 'data', 'vehicles', id));
+                    }
+                }
+            },
+
+            // 동기화 로직
+            sync: {
+                startRealtimeSync() {
+                    if (!App.db) return;
+                    
+                    // 스케줄 리스너
+                    const scheduleRef = collection(App.db, 'artifacts', appId, 'public', 'data', 'dispatchSchedule');
+                    onSnapshot(scheduleRef, (snapshot) => {
+                        snapshot.docChanges().forEach(change => {
+                            const data = change.doc.data();
+                            if (change.type === 'added' || change.type === 'modified') {
+                                // 로컬보다 서버가 최신이거나 로컬에 없으면 업데이트 (간이 충돌 해결)
+                                App.localDB.schedules.put(data);
+                                const idx = App.state.schedules.findIndex(s => s.id === data.id);
+                                if (idx > -1) App.state.schedules[idx] = data;
+                                else App.state.schedules.push(data);
+                            } else if (change.type === 'removed') {
+                                App.localDB.schedules.delete(change.doc.id);
+                                App.state.schedules = App.state.schedules.filter(s => s.id !== change.doc.id);
+                            }
+                        });
+                        App.logic.sortSchedules();
+                        if (App.ui.currentTab === 'dispatch') App.ui.renderCalendar();
+                    });
+
+                    // 차량 리스너
+                    const vehicleRef = collection(App.db, 'artifacts', appId, 'public', 'data', 'vehicles');
+                    onSnapshot(vehicleRef, (snapshot) => {
+                        const remoteVehicles = [];
+                        snapshot.forEach(doc => remoteVehicles.push(doc.data()));
+                        App.state.vehicles = remoteVehicles;
+                        App.localDB.vehicles.bulkPut(remoteVehicles); // 로컬 캐시 갱신
+                        if (App.ui.currentTab === 'vehicles') App.ui.renderVehicles();
+                    });
+                },
+
+                async processPending() {
+                    // 오프라인 중 변경사항 일괄 업로드
+                    const pending = await App.localDB.pendingSync.toArray();
+                    if (pending.length === 0) return;
+
+                    const batch = writeBatch(App.db);
+                    let count = 0;
+
+                    for (const item of pending) {
+                        const ref = doc(App.db, 'artifacts', appId, 'public', 'data', item.collection, item.id);
+                        if (item.action === 'write') batch.set(ref, item.data, { merge: true });
+                        else if (item.action === 'delete') batch.delete(ref);
+                        count++;
+                    }
+
+                    await batch.commit();
+                    await App.localDB.pendingSync.clear();
+                    App.ui.showToast(`${count}건의 데이터를 동기화했습니다.`, "info");
+                }
+            },
+
+            // 비즈니스 로직
+            logic: {
+                updateWeekStart() {
+                    const d = new Date(App.state.currentDate);
+                    const day = d.getDay();
+                    const diff = d.getDate() - day + (day == 0 ? -6 : 1); // 월요일 시작
+                    const monday = new Date(d.setDate(diff));
+                    monday.setHours(0,0,0,0);
+                    App.state.weekStart = monday;
+                },
+                navigateWeek(dir) {
+                    const d = new Date(App.state.currentDate);
+                    d.setDate(d.getDate() + (dir * 7));
+                    App.state.currentDate = d;
+                    this.updateWeekStart();
+                    App.ui.renderCalendar();
+                },
+                gotoToday() {
+                    App.state.currentDate = new Date();
+                    this.updateWeekStart();
+                    App.ui.renderCalendar();
+                },
+                sortSchedules() {
+                    // 1순위: 시간, 2순위: 작성자
+                    App.state.schedules.sort((a, b) => {
+                        if (a.time !== b.time) return a.time.localeCompare(b.time);
+                        return (a.author||'').localeCompare(b.author||'');
+                    });
+                }
+            },
+
+            // UI 제어
+            ui: {
+                currentTab: 'dispatch',
+                
+                switchTab(tab) {
+                    this.currentTab = tab;
+                    document.getElementById('view-dispatch').classList.toggle('hidden', tab !== 'dispatch');
+                    document.getElementById('view-vehicles').classList.toggle('hidden', tab !== 'vehicles');
+                    
+                    // 탭 스타일
+                    document.getElementById('tab-dispatch').className = tab === 'dispatch' ? 
+                        "px-4 py-1.5 rounded-md text-sm font-bold bg-white shadow-sm text-blue-600 transition-all" : 
+                        "px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700 transition-all";
+                    document.getElementById('tab-vehicles').className = tab === 'vehicles' ? 
+                        "px-4 py-1.5 rounded-md text-sm font-bold bg-white shadow-sm text-blue-600 transition-all" : 
+                        "px-4 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700 transition-all";
+
+                    if (tab === 'vehicles') this.renderVehicles();
+                    else this.renderCalendar();
+                },
+
+                render() {
+                    this.updateStatus();
+                    if (this.currentTab === 'dispatch') this.renderCalendar();
+                    else this.renderVehicles();
+                },
+
+                updateStatus() {
+                    const el = document.getElementById('connection-status');
+                    if (App.state.isOnline) el.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> 온라인`;
+                    else el.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-500"></span> 오프라인`;
+                },
+
+                renderCalendar() {
+                    const start = App.state.weekStart;
+                    const weekDates = Array.from({length: 7}, (_, i) => {
+                        const d = new Date(start);
+                        d.setDate(d.getDate() + i);
+                        return d;
+                    });
+
+                    // 헤더 업데이트
+                    const end = weekDates[6];
+                    document.getElementById('week-display').innerText = `${start.getFullYear()}년 ${start.getMonth()+1}월`;
+                    document.getElementById('date-range-display').innerText = `${start.getMonth()+1}.${start.getDate()} ~ ${end.getMonth()+1}.${end.getDate()}`;
+
+                    const container = document.getElementById('calendar-container');
+                    
+                    // 테이블 생성
+                    let html = `<table class="w-full h-full table-fixed border-collapse">`;
+                    
+                    // 헤더 (요일)
+                    html += `<thead class="bg-gray-50 text-gray-500 text-xs uppercase sticky top-0 z-10 border-b border-gray-200"><tr>`;
+                    weekDates.forEach((d, i) => {
+                        const isToday = d.toDateString() === new Date().toDateString();
+                        const dayName = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
+                        html += `<th class="p-2 border-r border-gray-100 ${isToday ? 'bg-blue-50 text-blue-600' : ''}">
+                            <div class="flex flex-col items-center">
+                                <span class="font-bold text-sm">${dayName}</span>
+                                <span class="${isToday ? 'bg-blue-600 text-white rounded-full w-6 h-6 flex items-center justify-center mt-1' : 'mt-1'}">${d.getDate()}</span>
+                            </div>
+                        </th>`;
+                    });
+                    html += `</tr></thead>`;
+
+                    // 바디 (데이터)
+                    html += `<tbody class="divide-x divide-gray-100 bg-white"><tr>`;
+                    weekDates.forEach(date => {
+                        const dateStr = date.toISOString().split('T')[0];
+                        const daySchedules = App.state.schedules.filter(s => s.date === dateStr);
+                        
+                        html += `<td class="align-top p-1 h-full hover:bg-gray-50 transition-colors" style="min-height: 400px;">
+                            <button onclick="App.ui.openDispatchModal(null, '${dateStr}')" class="w-full py-2 mb-2 text-xs text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded border border-dashed border-gray-200 transition flex items-center justify-center gap-1">
+                                <i class="fa-solid fa-plus"></i> 추가
+                            </button>
+                            <div class="flex flex-col gap-2">`;
+                        
+                        daySchedules.forEach(s => {
+                            const vehicle = App.state.vehicles.find(v => v.id === s.vehicleId) || {name: '미지정', type: ''};
+                            const statusColor = s.status === '완료' ? 'bg-gray-100 border-gray-200 text-gray-500' : 
+                                                s.status === '운송중' ? 'bg-blue-50 border-blue-200' : 'bg-white border-gray-200';
+                            
+                            html += `
+                                <div onclick="App.ui.openDispatchModal('${s.id}')" class="p-2 rounded-lg border shadow-sm cursor-pointer cell-hover group relative ${statusColor}">
+                                    <div class="flex justify-between items-start mb-1">
+                                        <span class="font-bold text-blue-600 text-xs bg-white px-1.5 py-0.5 rounded border border-blue-100">${s.time}</span>
+                                        <span class="text-[10px] px-1.5 py-0.5 rounded-full ${s.status==='완료'?'bg-gray-200':'bg-green-100 text-green-700'}">${s.status}</span>
+                                    </div>
+                                    <div class="font-bold text-sm text-gray-800 truncate">${vehicle.name}</div>
+                                    <div class="text-xs text-gray-500 truncate mb-1">${vehicle.type}</div>
+                                    <div class="text-xs text-gray-700 bg-white/50 p-1 rounded break-words leading-tight border border-transparent group-hover:border-gray-200">
+                                        ${s.content || '-'}
+                                    </div>
+                                    <div class="text-[10px] text-gray-400 text-right mt-1">by ${s.author||'unknown'}</div>
+                                </div>
+                            `;
+                        });
+                        
+                        html += `</div></td>`;
+                    });
+                    html += `</tr></tbody></table>`;
+                    
+                    container.innerHTML = html;
+                },
+
+                renderVehicles() {
+                    const tbody = document.getElementById('vehicle-list-body');
+                    if (App.state.vehicles.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-400">등록된 차량이 없습니다.</td></tr>`;
+                        return;
+                    }
+
+                    tbody.innerHTML = App.state.vehicles.map(v => `
+                        <tr class="hover:bg-gray-50 border-b border-gray-100">
+                            <td class="p-4 font-bold text-gray-800">${v.name}</td>
+                            <td class="p-4 text-sm text-gray-600"><span class="bg-gray-100 px-2 py-1 rounded">${v.vehicleType}</span></td>
+                            <td class="p-4 text-sm text-gray-600">${v.area || '-'}</td>
+                            <td class="p-4 text-sm text-gray-600">${v.phone || '-'}</td>
+                            <td class="p-4"><span class="px-2 py-1 rounded-full text-xs font-bold ${v.status==='가능'?'bg-green-100 text-green-700':'bg-yellow-100 text-yellow-700'}">${v.status}</span></td>
+                            <td class="p-4 text-right">
+                                <button onclick="App.ui.openVehicleModal('${v.id}')" class="text-blue-600 hover:bg-blue-50 p-2 rounded"><i class="fa-solid fa-pen"></i></button>
+                                <button onclick="App.data.deleteVehicle('${v.id}')" class="text-red-600 hover:bg-red-50 p-2 rounded"><i class="fa-solid fa-trash"></i></button>
+                            </td>
+                        </tr>
+                    `).join('');
+                },
+
+                // --- 모달 관리 ---
+                openDispatchModal(id = null, dateStr = null) {
+                    const item = id ? App.state.schedules.find(s => s.id === id) : { 
+                        date: dateStr || new Date().toISOString().split('T')[0], 
+                        time: '09:00',
+                        status: '예정' 
+                    };
+                    
+                    const vehicleOptions = App.state.vehicles.map(v => 
+                        `<option value="${v.id}" ${item.vehicleId===v.id?'selected':''}>${v.name} (${v.vehicleType})</option>`
+                    ).join('');
+
+                    const html = `
+                        <div class="p-6">
+                            <h2 class="text-xl font-bold mb-4 text-gray-800 border-b pb-2 flex justify-between">
+                                ${id ? '배차 수정' : '배차 등록'}
+                                ${id ? `<button onclick="App.data.deleteDispatch('${id}'); App.ui.closeModal()" class="text-red-500 text-sm hover:underline">삭제</button>` : ''}
+                            </h2>
+                            <form onsubmit="event.preventDefault(); App.ui.submitDispatchForm(this)">
+                                <input type="hidden" name="id" value="${item.id||''}">
+                                <div class="grid grid-cols-2 gap-4 mb-4">
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-1">날짜</label>
+                                        <input type="date" name="date" required value="${item.date}" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-1">시간</label>
+                                        <input type="time" name="time" required value="${item.time}" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                    </div>
+                                </div>
+                                <div class="mb-4">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">차량 선택</label>
+                                    <select name="vehicleId" required class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                                        <option value="">차량을 선택하세요</option>
+                                        ${vehicleOptions}
+                                    </select>
+                                </div>
+                                <div class="mb-4">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">운송 내용 (스크랩 종류/중량)</label>
+                                    <textarea name="content" required rows="3" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none" placeholder="예: A동 고철 상차 5톤">${item.content||''}</textarea>
+                                </div>
+                                <div class="mb-6">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">상태</label>
+                                    <div class="flex gap-4">
+                                        <label class="flex items-center gap-2"><input type="radio" name="status" value="예정" ${item.status==='예정'?'checked':''}> 예정</label>
+                                        <label class="flex items-center gap-2"><input type="radio" name="status" value="운송중" ${item.status==='운송중'?'checked':''}> 운송중</label>
+                                        <label class="flex items-center gap-2"><input type="radio" name="status" value="완료" ${item.status==='완료'?'checked':''}> 완료</label>
+                                    </div>
+                                </div>
+                                <div class="flex justify-end gap-2">
+                                    <button type="button" onclick="App.ui.closeModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-bold hover:bg-gray-300">취소</button>
+                                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md">저장</button>
+                                </div>
+                            </form>
+                        </div>
+                    `;
+                    this.showModal(html);
+                },
+
+                openVehicleModal(id = null) {
+                    const item = id ? App.state.vehicles.find(v => v.id === id) : { status: '가능', vehicleType: '집게차' };
+                    const html = `
+                        <div class="p-6">
+                            <h2 class="text-xl font-bold mb-4 text-gray-800 border-b pb-2">${id ? '차량 수정' : '신규 차량 등록'}</h2>
+                            <form onsubmit="event.preventDefault(); App.ui.submitVehicleForm(this)">
+                                <input type="hidden" name="id" value="${item.id||''}">
+                                <div class="mb-4">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">차량/기사명</label>
+                                    <input type="text" name="name" required value="${item.name||''}" placeholder="예: 김기사(1234)" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                                </div>
+                                <div class="grid grid-cols-2 gap-4 mb-4">
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-1">차종</label>
+                                        <select name="vehicleType" class="w-full p-2 border rounded-lg">
+                                            <option ${item.vehicleType==='집게차'?'selected':''}>집게차</option>
+                                            <option ${item.vehicleType==='방통차'?'selected':''}>방통차</option>
+                                            <option ${item.vehicleType==='카고'?'selected':''}>카고</option>
+                                            <option ${item.vehicleType==='덤프'?'selected':''}>덤프</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-1">상태</label>
+                                        <select name="status" class="w-full p-2 border rounded-lg">
+                                            <option ${item.status==='가능'?'selected':''}>가능</option>
+                                            <option ${item.status==='운행중'?'selected':''}>운행중</option>
+                                            <option ${item.status==='수리중'?'selected':''}>수리중</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="mb-4">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">운송 구역</label>
+                                    <input type="text" name="area" value="${item.area||''}" placeholder="예: 경기 남부" class="w-full p-2 border rounded-lg">
+                                </div>
+                                <div class="mb-6">
+                                    <label class="block text-sm font-bold text-gray-700 mb-1">연락처</label>
+                                    <input type="text" name="phone" value="${item.phone||''}" placeholder="010-0000-0000" class="w-full p-2 border rounded-lg">
+                                </div>
+                                <div class="flex justify-end gap-2">
+                                    <button type="button" onclick="App.ui.closeModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-bold hover:bg-gray-300">취소</button>
+                                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-md">저장</button>
+                                </div>
+                            </form>
+                        </div>
+                    `;
+                    this.showModal(html);
+                },
+
+                openSettings() {
+                    const name = localStorage.getItem('writerName') || '';
+                    const html = `
+                        <div class="p-6">
+                            <h2 class="text-xl font-bold mb-4 text-gray-800">⚙️ 환경 설정</h2>
+                            <div class="mb-4">
+                                <label class="block text-sm font-bold text-gray-700 mb-1">작성자 이름 (내 이름)</label>
+                                <input type="text" id="setting-name" value="${name}" class="w-full p-2 border rounded-lg mb-1">
+                                <p class="text-xs text-gray-500">배차 등록 시 작성자로 기록됩니다.</p>
+                            </div>
+                            <div class="mb-6 space-y-2">
+                                <label class="flex items-center gap-2">
+                                    <input type="checkbox" id="setting-sound" ${App.state.settings.sound ? 'checked' : ''} class="w-4 h-4">
+                                    <span>알림음 켜기</span>
+                                </label>
+                            </div>
+                            <div class="flex justify-end gap-2">
+                                <button onclick="App.ui.saveSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold">저장</button>
+                            </div>
+                        </div>
+                    `;
+                    this.showModal(html);
+                },
+
+                showModal(content) {
+                    const container = document.getElementById('modal-container');
+                    container.innerHTML = `
+                        <div class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop animate-fade-in" onclick="if(event.target===this) App.ui.closeModal()">
+                            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all scale-100">
+                                ${content}
+                            </div>
+                        </div>
+                    `;
+                },
+
+                closeModal() {
+                    document.getElementById('modal-container').innerHTML = '';
+                },
+
+                submitDispatchForm(form) {
+                    const formData = new FormData(form);
+                    const data = Object.fromEntries(formData.entries());
+                    App.data.saveDispatch(data);
+                    this.closeModal();
+                },
+
+                submitVehicleForm(form) {
+                    const formData = new FormData(form);
+                    const data = Object.fromEntries(formData.entries());
+                    App.data.saveVehicle(data);
+                    this.closeModal();
+                },
+
+                saveSettings() {
+                    const name = document.getElementById('setting-name').value;
+                    const sound = document.getElementById('setting-sound').checked;
+                    localStorage.setItem('writerName', name);
+                    App.state.settings.sound = sound;
+                    this.closeModal();
+                    this.showToast("설정이 저장되었습니다.");
+                },
+
+                getWriterName() {
+                    return localStorage.getItem('writerName') || '미상';
+                },
+
+                showToast(msg, type='success') {
+                    const container = document.getElementById('toast-container');
+                    const el = document.createElement('div');
+                    el.className = `px-4 py-3 rounded-lg shadow-lg text-white font-bold text-sm pointer-events-auto toast-enter ${type==='error'?'bg-red-500':type==='warning'?'bg-orange-500':'bg-green-600'}`;
+                    el.innerHTML = `<i class="fa-solid ${type==='error'?'fa-circle-exclamation':'fa-check-circle'} mr-2"></i>${msg}`;
+                    container.appendChild(el);
+                    setTimeout(() => el.remove(), 3000);
+                },
+
+                playNotificationSound() {
+                    if(!App.state.settings.sound) return;
+                    // 짧은 알림음 (Data URI)
+                    const audio = new Audio("data:audio/wav;base64,UklGRl9vT1JXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgCWGFjdGEgAAAAMgAAAEgAAABQcm9kdWNlZCBieSBzb3VuZGdlbmVyYXRvcnMubmV0AGJib2I=");
+                    audio.volume = 0.5;
+                    audio.play().catch(()=>{});
+                },
+
+                exportExcel() {
+                    const data = App.state.schedules.map(s => {
+                        const v = App.state.vehicles.find(v => v.id === s.vehicleId) || {};
+                        return {
+                            날짜: s.date,
+                            시간: s.time,
+                            차량명: v.name || '미지정',
+                            차종: v.vehicleType || '',
+                            내용: s.content,
+                            상태: s.status,
+                            작성자: s.author
+                        };
+                    });
+                    const ws = XLSX.utils.json_to_sheet(data);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "배차스케줄");
+                    XLSX.writeFile(wb, "배차스케줄.xlsx");
+                }
+            }
+        };
+
+        // 앱 시작
+        window.App = App;
+        App.init();
+    </script>
+</body>
+</html>
